@@ -1,6 +1,10 @@
+import collections
 import itertools
 import math
+import random
+import sys
 
+import lark
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -9,42 +13,111 @@ from random import choice, randint
 import string
 
 # Data generation
-def generate_expression(max_len=10):
-    operands = string.digits
-    operators = "+-*/"
-    n = randint(1, max_len // 2)
-    expr = [choice(operands)]
+grammar = '''
+    start: expr
+    expr: expr "+" term -> add
+        | expr "-" term -> sub
+        | term
+    term: term "*" factor -> mul
+        | term "/" factor -> div
+        | factor
+    factor: "(" expr ")" -> parens
+          | NUMBER
+    %import common.NUMBER
+    %import common.WS
+    %ignore WS
+'''
 
-    for _ in range(n):
-        op = choice(operators)
-        num = choice(operands)
-        expr.extend([op, num])
+parser = lark.Lark(grammar, parser='lalr')
 
-    return "".join(expr)
+class GrammarRandomGenerator:
+    def __init__(self, parser, max_depth=2):
+        self.rules = collections.defaultdict(list)
+        for rule in parser.rules:
+            self.rules[rule.origin].append(rule.expansion)
+        self.max_depth = max_depth
 
-def infix_to_postfix(expr):
-    precedence = {'+': 1, '-': 1, '*': 2, '/': 2, '(': 0}
-    stack = []
-    postfix = []
-
-    for c in expr:
-        if c in string.digits:
-            postfix.append(c)
-        elif c == '(':
-            stack.append(c)
-        elif c == ')':
-            while stack and stack[-1] != '(':
-                postfix.append(stack.pop())
-            stack.pop()
+    def terminal_to_value(self, terminal_name):
+        if terminal_name == "PLUS":
+            return "+"
+        elif terminal_name == "MINUS":
+            return "-"
+        elif terminal_name == "STAR":
+            return "*"
+        elif terminal_name == "SLASH":
+            return "/"
+        elif terminal_name == "LPAR":
+            return "("
+        elif terminal_name == "RPAR":
+            return ")"
+        elif terminal_name == "NUMBER":
+            return str(random.randint(0, 9))
         else:
-            while stack and precedence[stack[-1]] >= precedence[c]:
-                postfix.append(stack.pop())
-            stack.append(c)
+            return terminal_name
 
-    while stack:
-        postfix.append(stack.pop())
+    def generate(self, symbol=lark.grammar.NonTerminal('start'), depth=0):
+        if symbol not in self.rules:
+            return symbol
 
-    return "".join(postfix) + "E"
+        if depth >= self.max_depth:
+            alternatives = []
+            for rule in self.rules[symbol]:
+                if all(child.is_term for child in rule):
+                    alternatives.append(rule)
+            if not alternatives:
+                alternatives = self.rules[symbol]
+                alternatives.sort(key=len)
+                alternatives = alternatives[:1]
+        else:
+            alternatives = self.rules[symbol]
+        chosen_alternative = random.choice(alternatives)
+
+
+        generated = ''
+        for child in chosen_alternative:
+            if child.is_term:
+                generated += self.terminal_to_value(child.name)
+            else:
+                generated += self.generate(symbol=child, depth=depth+1)
+
+        return generated
+
+
+class ToPostfix(lark.visitors.Interpreter):
+    def add(self, tree):
+        return self.visit(tree.children[0]) + ' ' + self.visit(tree.children[1]) + ' +'
+
+    def sub(self, tree):
+        return self.visit(tree.children[0]) + ' ' + self.visit(tree.children[1]) + ' -'
+
+    def mul(self, tree):
+        return self.visit(tree.children[0]) + ' ' + self.visit(tree.children[1]) + ' *'
+
+    def div(self, tree):
+        return self.visit(tree.children[0]) + ' ' + self.visit(tree.children[1]) + ' /'
+
+    def parens(self, tree):
+        return self.visit(tree.children[0])
+
+    def expr(self, tree):
+        return self.visit(tree.children[0])
+
+    def term(self, tree):
+        return self.visit(tree.children[0])
+
+    def factor(self, tree):
+        return self.visit(tree.children[0])
+
+    def NUMBER(self, tree):
+        return tree.value
+
+    def visit(self, tree):
+        if isinstance(tree, lark.Tree):
+            return super().visit(tree)
+        elif isinstance(tree, lark.Token) and tree.type == 'NUMBER':
+            return self.NUMBER(tree)
+        else:
+            return tree
 
 def output_to_text(output):
     # Get the most probable character index (dimension: batch_size x seq_length)
@@ -62,13 +135,15 @@ def output_to_text(output):
 class InfixPostfixDataset(Dataset):
     def __init__(self, num_samples):
         self.num_samples = num_samples
+        self.generator = GrammarRandomGenerator(parser)
+        self.to_postfix = ToPostfix()
 
     def __len__(self):
         return self.num_samples
 
     def __getitem__(self, idx):
-        infix = generate_expression()
-        postfix = infix_to_postfix(infix)
+        infix = self.generator.generate()
+        postfix = self.to_postfix.visit(parser.parse(infix))[0]
         return infix, postfix
 
 class BatchIterator:
@@ -157,7 +232,8 @@ def train_epoch(model, dataloader, optimizer, criterion, device):
                 actual = actual[:actual_end]
             except ValueError:
                 pass
-            print(target.rjust(20), actual)
+            print(f'\033[31;3m{target}\033[m')
+            print(actual)
             break
 
         # Loss calculation and backpropagation
@@ -210,7 +286,7 @@ def main():
     # Configuration
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     epochs = 20
-    batch_size = 128
+    batch_size = 32
     d_model = 128
     nhead = 16
     num_layers = 2
@@ -222,7 +298,7 @@ def main():
     # Model, optimizer, and loss
     vocab_size = 128  # ASCII characters
     model = TransformerModel(vocab_size, d_model, nhead, num_layers).to(device)
-    optimizer = optim.Adam(model.parameters())
+    optimizer = optim.Adam(model.parameters(), weight_decay=1e-5)
     criterion = nn.CrossEntropyLoss(ignore_index=0)  # Ignore padding index
 
     # Training loop
