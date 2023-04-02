@@ -31,6 +31,7 @@ def create_database():
                   epoch INTEGER,
                   train_loss REAL,
                   learning_rate REAL,
+                  max_depth INTEGER,
                   FOREIGN KEY(run_id) REFERENCES runs(id))''')
 
     conn.commit()
@@ -67,13 +68,17 @@ def main():
     for epoch in itertools.count():
         train_loss = train_epoch(model, train_iterator, optimizer, criterion, device)
 
+        if train_loss < 0.1:
+            train_dataset.generator.max_depth += 1
+
         # Log epoch metrics
         learning_rate = optimizer.param_groups[0]['lr']
-        c.execute("INSERT INTO epochs (run_id, epoch, train_loss, learning_rate) VALUES (?, ?, ?, ?)",
-                  (run_id, epoch, train_loss, learning_rate))
+        max_depth = train_dataset.generator.max_depth
+        c.execute("INSERT INTO epochs (run_id, epoch, train_loss, learning_rate, max_depth) VALUES (?, ?, ?, ?, ?)",
+                  (run_id, epoch, train_loss, learning_rate, max_depth))
         conn.commit()
 
-        print(f"Epoch: {epoch}, Train Loss: {train_loss:.4f}, Learning Rate: {learning_rate:.6f}")
+        print(f"Epoch: {epoch}, Train Loss: {train_loss:.4f}, Learning Rate: {learning_rate:.6f}, Max Depth: {max_depth}")
         sys.stdout.flush()
 
 if __name__ == "__main__":
